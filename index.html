@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>Deriv Live Digit Scanner</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <style>
 body{margin:0;background:#0b0f14;color:#eee;font-family:Arial,sans-serif}
 .wrap{max-width:520px;margin:auto;padding:14px}
@@ -157,38 +158,84 @@ function render(){
 function connect(){
   if(!running)return;
   if(ws){try{ws.close();}catch(e){}}
-  setStatus("Connecting to Deriv…","warn");
-  ws=new WebSocket("wss://ws.derivws.com/websockets/v3?app_id=1089");
-  ws.onopen=function(){
-    setStatus("Connected — receiving live ticks","good");
-    if(document.getElementById("market").value==="SCAN"){
-      symbols.forEach(function(s){ws.send(JSON.stringify({ticks:s,subscribe:1}));});
-    }else{
-      ws.send(JSON.stringify({ticks:document.getElementById("market").value,subscribe:1}));
-    }
-  };
-  ws.onmessage=function(ev){
-    try{
-      var m=JSON.parse(ev.data);
-      if(m.error){setStatus("Deriv error: "+m.error.message,"bad");return;}
-      if(m.tick){
-        var s=m.tick.symbol;
-        if(!histories[s])histories[s]=[];
-        histories[s].push({d:digitOf(m.tick.quote),q:m.tick.quote,t:Date.now()});
-        if(histories[s].length>200)histories[s].shift();
-        render();
-      }
-    }catch(e){}
-  };
-  ws.onerror=function(){setStatus("Connection error — retrying…","bad");};
-  ws.onclose=function(){
-    if(running){
-      setStatus("Connection closed — reconnecting…","warn");
+  var endpoints=[
+    "wss://ws.derivws.com/websockets/v3?app_id=1089",
+    "wss://ws.binaryws.com/websockets/v3?app_id=1089"
+  ];
+  var attempt=0, opened=false;
+
+  function tryEndpoint(){
+    if(!running)return;
+    if(attempt>=endpoints.length){
+      setStatus("Deriv connection unavailable — retrying…","bad");
       clearTimeout(reconnectTimer);
-      reconnectTimer=setTimeout(connect,2500);
-    }else setStatus("Stopped","warn");
-  };
+      reconnectTimer=setTimeout(function(){attempt=0;tryEndpoint();},4000);
+      return;
+    }
+    var url=endpoints[attempt++];
+    setStatus("Connecting to Deriv…","warn");
+    try{ ws=new WebSocket(url); }catch(e){ tryEndpoint(); return; }
+
+    var timeout=setTimeout(function(){
+      if(!opened){
+        try{ws.close();}catch(e){}
+        tryEndpoint();
+      }
+    },7000);
+
+    ws.onopen=function(){
+      opened=true;
+      clearTimeout(timeout);
+      setStatus("Connected — receiving live ticks","good");
+      var selected=document.getElementById("market").value;
+      if(selected==="SCAN"){
+        symbols.forEach(function(sym){
+          try{ws.send(JSON.stringify({ticks:sym,subscribe:1}));}catch(e){}
+        });
+      }else{
+        try{ws.send(JSON.stringify({ticks:selected,subscribe:1}));}catch(e){}
+      }
+    };
+
+    ws.onmessage=function(ev){
+      try{
+        var m=JSON.parse(ev.data);
+        if(m.error){
+          setStatus("Deriv: "+m.error.message,"bad");
+          if(!opened){try{ws.close();}catch(e){}}
+          return;
+        }
+        if(m.msg_type==="tick" && m.tick){
+          var sym=m.tick.symbol;
+          if(!histories[sym])histories[sym]=[];
+          histories[sym].push({d:digitOf(m.tick.quote),q:m.tick.quote,t:Date.now()});
+          if(histories[sym].length>200)histories[sym].shift();
+          render();
+        }
+      }catch(e){}
+    };
+
+    ws.onerror=function(){
+      if(!opened){
+        clearTimeout(timeout);
+        try{ws.close();}catch(e){}
+        tryEndpoint();
+      }else{
+        setStatus("Live connection error — reconnecting…","bad");
+      }
+    };
+
+    ws.onclose=function(){
+      if(running && opened){
+        setStatus("Connection closed — reconnecting…","warn");
+        clearTimeout(reconnectTimer);
+        reconnectTimer=setTimeout(function(){attempt=0;tryEndpoint();},2500);
+      }
+    };
+  }
+  tryEndpoint();
 }
+
 document.getElementById("scan").onclick=function(){
   running=true;
   symbols.forEach(function(s){histories[s]=[];});
